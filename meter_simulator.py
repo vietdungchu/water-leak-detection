@@ -1,70 +1,83 @@
-import csv
 import time
 import random
 from datetime import datetime
+from db import init_db, insert_reading
+import logging
 
-# CSV file name
-CSV_FILE = "water_meter_readings.csv"
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-# Meter configuration
-METER_ID = "MTR-001"
-INITIAL_VOLUME = 10000.0  # liters
-INTERVAL_SECONDS = 5      # time between readings
+# Configuration
+INTERVAL_SECONDS = 5
+LEAK_PROBABILITY = 0.05
+NUM_METERS = 1  # Start with 1, can scale to 50000
 
-# Leak simulation
-LEAK_PROBABILITY = 0.05   # 5% chance to simulate a leak
+# Meter configurations
+meters = {}
 
 
-def simulate_water_consumption(is_leak=False):
-    """
-    Simulate water consumption in liters.
-    Normal usage: small random value
-    Leak usage: higher constant value
-    """
+def init_meters(num_meters=1):
+    """Initialize meter states."""
+    for i in range(num_meters):
+        meter_id = f"MTR-{i+1:06d}"
+        meters[meter_id] = {
+            "volume": 10000.0 + (i * 100),  # Slightly different initial volumes
+            "is_leaking": False,
+            "leak_duration": 0
+        }
+
+
+def simulate_water_consumption(meter_id, is_leak=False):
+    """Simulate water consumption in liters."""
     if is_leak:
         return random.uniform(5.0, 10.0)  # leak flow
     else:
         return random.uniform(0.0, 1.5)   # normal usage
 
 
-def write_csv_header():
-    """Create CSV file with header if it does not exist."""
-    try:
-        with open(CSV_FILE, mode="x", newline="") as file:
-            writer = csv.writer(file)
-            writer.writerow(["meter_id", "timestamp", "volume_liters"])
-    except FileExistsError:
-        pass  # File already exists
-
-
-def append_reading(meter_id, timestamp, volume):
-    """Append one meter reading to CSV."""
-    with open(CSV_FILE, mode="a", newline="") as file:
-        writer = csv.writer(file)
-        writer.writerow([meter_id, timestamp, volume])
-
-
 def main():
-    print("Starting water meter simulator...")
-    write_csv_header()
-
-    current_volume = INITIAL_VOLUME
-
-    while True:
-        timestamp = datetime.utcnow().isoformat()
-
-        # Randomly decide if there is a leak
-        is_leak = random.random() < LEAK_PROBABILITY
-
-        consumption = simulate_water_consumption(is_leak)
-        current_volume += consumption
-
-        append_reading(METER_ID, timestamp, round(current_volume, 2))
-
-        status = "LEAK" if is_leak else "NORMAL"
-        print(f"[{timestamp}] {status} | +{consumption:.2f} L | Total: {current_volume:.2f} L")
-
-        time.sleep(INTERVAL_SECONDS)
+    logger.info("Initializing database...")
+    init_db()
+    
+    logger.info(f"Initializing {NUM_METERS} meter(s)...")
+    init_meters(NUM_METERS)
+    
+    logger.info("Starting water meter simulator...")
+    reading_count = 0
+    
+    try:
+        while True:
+            timestamp = datetime.utcnow().isoformat()
+            
+            for meter_id, state in meters.items():
+                # Randomly decide if there is a leak
+                is_leak = random.random() < LEAK_PROBABILITY
+                
+                if is_leak:
+                    state["is_leaking"] = True
+                    state["leak_duration"] += INTERVAL_SECONDS
+                else:
+                    state["is_leaking"] = False
+                    state["leak_duration"] = 0
+                
+                consumption = simulate_water_consumption(meter_id, is_leak)
+                state["volume"] += consumption
+                
+                # Insert reading into database
+                insert_reading(meter_id, timestamp, round(state["volume"], 2))
+                reading_count += 1
+                
+                status = "LEAK" if is_leak else "NORMAL"
+                if reading_count % 10 == 0:  # Log every 10 readings
+                    logger.info(
+                        f"[{timestamp}] {meter_id} {status} | "
+                        f"+{consumption:.2f}L | Total: {state['volume']:.2f}L"
+                    )
+            
+            time.sleep(INTERVAL_SECONDS)
+            
+    except KeyboardInterrupt:
+        logger.info(f"Simulator stopped. Generated {reading_count} readings.")
 
 
 if __name__ == "__main__":
